@@ -1,18 +1,20 @@
-#include<Windows.h>
-#include<stdio.h>
 #include<thread>
+#include<stdio.h>
+#include<Windows.h>
+#include<TlHelp32.h>
 using namespace std;
-HANDLE z;
 HWND x,xm;
-FARPROC wph;
-HMODULE hdll;
+FARPROC wph,wph2;
+HMODULE hdll,hdll2;
 unsigned long y;
 APPBARDATA appbd;
-HHOOK kHook,mHook,wHook;
+HANDLE z,hMapFile,hMapFile2;
+HHOOK kHook,mHook,wHook,wHook2;
 WINDOWPLACEMENT placement;
 bool m,k,l=1,p,q,a1[256],b1[3];
-char WindowTitle[256],s[1001],cn,comd[100][256]={
-"help","list","kill","mark","hide","show","topmost","nottopmost","all","taskbar","auto","disable"
+unsigned long long hidepid,taskpid;
+char WindowTitle[256],s[1001],cn,dpath[1024],*fileName,comd[100][256]={
+"help","list","kill","mark","hide","show","topmost","nottopmost","all","taskbar","auto","disable","window","process","plus"
 };
 struct ax{
 	HWND a;
@@ -25,7 +27,7 @@ struct ax{
 int chge(char*a){
 	int b=0,c=strlen(a);
 	for(unsigned int i=0;i<c;i++){
-		if(a[i]>47&&a1[i]<58){
+		if(a[i]>47&&a[i]<58){
 			b=b*10+a[i]-48;
 		}else{
 			return 0;
@@ -53,6 +55,90 @@ void destorylist(ax*a){
 	else a->b->c=a->c;
 	a->c->b=a->b;
 	free(a);
+}
+bool GetProcessNameByPID(int pid,char*s){
+    HANDLE hSnapshot=CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS,0);
+    if(hSnapshot==INVALID_HANDLE_VALUE){
+        return 0;
+    }
+    PROCESSENTRY32 pe32;
+    pe32.dwSize=sizeof(PROCESSENTRY32);
+    if(!Process32First(hSnapshot,&pe32)){
+        CloseHandle(hSnapshot);
+        return 0;
+    }
+    while(Process32Next(hSnapshot,&pe32)){
+        if(pe32.th32ProcessID==pid){
+            strcpy(s,pe32.szExeFile);
+            CloseHandle(hSnapshot);
+            return 1;
+        }
+    }
+    CloseHandle(hSnapshot);
+    return 0;
+}
+bool injectdll(unsigned long long dpid,const char*dpath){
+    void*dproc=OpenProcess(PROCESS_ALL_ACCESS,0,dpid);
+    if(!dproc){
+        printf("%s\n","Failed to open process.");
+        return 0;
+    }
+    void*dprocadd=VirtualAllocEx(dproc,NULL,strlen(dpath)+1,MEM_COMMIT,PAGE_READWRITE);
+    if(!dprocadd){
+        printf("%s\n","Failed to allocate memory in the remote process.");
+        CloseHandle(dproc);
+        return 0;
+    }
+    if(!WriteProcessMemory(dproc,dprocadd,dpath,strlen(dpath)+1,0)){
+        printf("%s\n","Failed to write to remote process memory.");
+        VirtualFreeEx(dproc,dprocadd,0,MEM_RELEASE);
+        CloseHandle(dproc);
+        return 0;
+    }
+    HMODULE dmod=LoadLibraryA("kernel32.dll");
+    LPTHREAD_START_ROUTINE founadd=(LPTHREAD_START_ROUTINE)GetProcAddress(dmod,"LoadLibraryA");
+    void*dthre=CreateRemoteThread(dproc,0,0,founadd,dprocadd,0,0);
+    if(!dthre){
+        printf("%s\n","Failed to create a remote thread in the target process.");
+        VirtualFreeEx(dproc,dprocadd,0,MEM_RELEASE);
+        CloseHandle(dproc);
+        return 0;
+    }
+    WaitForSingleObject(dthre,INFINITE);
+    CloseHandle(dthre);
+    FreeLibrary(dmod);
+    VirtualFreeEx(dproc,dprocadd,0,MEM_RELEASE);
+    CloseHandle(dproc);
+    return 1;
+}
+bool uninstalldll(unsigned long long dpid,const char*dpath){
+    void*dproc=OpenProcess(PROCESS_ALL_ACCESS,0,dpid),*vdll;
+    HMODULE dmod=LoadLibraryA("kernel32.dll");
+    LPTHREAD_START_ROUTINE founadd=(LPTHREAD_START_ROUTINE)GetProcAddress(dmod,"FreeLibrary");
+    HANDLE snapshot=CreateToolhelp32Snapshot(TH32CS_SNAPMODULE,dpid);
+    if (snapshot==INVALID_HANDLE_VALUE){
+    	printf("%s\n","Failed to create a process snapshot for the target process.");
+	}
+	MODULEENTRY32 me32;
+    me32.dwSize=sizeof(MODULEENTRY32);
+    if(Module32First(snapshot,&me32)){
+        do{
+            if(strstr(me32.szExePath,dpath)){
+                vdll=me32.modBaseAddr;
+            }
+
+        }while(Module32Next(snapshot,&me32));
+    }
+    CloseHandle(snapshot);
+    void*dthre=CreateRemoteThread(dproc,0,0,founadd,vdll,0,0);
+    if(!dthre){
+        printf("%s\n","Failed to create a remote thread in the target process.");
+        CloseHandle(dproc);
+        return 0;
+    }
+    WaitForSingleObject(dthre,INFINITE);
+    CloseHandle(dproc);
+    return 1;
 }
 BOOL CALLBACK EnumWindowsProc(HWND hwnd,LPARAM lParam){
 	GetWindowTextA(hwnd,WindowTitle,256);
@@ -211,16 +297,19 @@ void thread1(){
 	while(1){
 		scanf("%s",s);
 		if(!strcmp(s,comd[0])){
-			printf("%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n",
+			printf("%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n",
 			"help--显示所有本程序支持的指令",
 			"list--列出所有可见的窗口(前缀***表示被标记，后缀--窗口[HWND]--对应进程[PID])",
 			"list all--列出所有窗口",
-			"kill [PID]--终止指定进程[PID]",
 			"mark [HWND]--标记/取消标记一个窗口[HWND]",
-			"hide [HWND]--隐藏指定窗口[HWND]",
+			"hide window [HWND]--隐藏指定窗口[HWND]",
 			"show [HWND]--显示指定窗口[HWND]",
 			"topmost [HWND]--将指定窗口[HWND]置顶",
 			"nottopmost [HWND]--取消指定窗口[HWND]的置顶",
+			"kill [PID]--终止进程[PID]",
+			"hide process [PID1] [PID2]--面对进程[PID1]隐藏进程[PID2]",
+			"hide process plus [PID1] [PID2]--面对进程[PID1]隐藏进程[PID2](注意:即使进程[PID1]重启也无法解除隐藏)",
+			"disable hide process--取消所有的进程隐藏",
 			"hide taskbar auto--自动隐藏任务栏：最大化窗口时隐藏，取消窗口最大化并且按下Ctrl时恢复任务栏显示",
 			"disable hide taskbar auto--取消hide taskbar auto的设置",
 			"Author:LYhong-bilibili摸鱼自动机-依",
@@ -277,26 +366,72 @@ a:
 		}
 		if(!strcmp(s,comd[4])){
 			scanf("%s",s);
+			if(!strcmp(s,comd[13])){
+				scanf("%s",s);
+				taskpid=chge(s);
+				hMapFile=CreateFileMapping(INVALID_HANDLE_VALUE,0,PAGE_READWRITE,0,256,"taskp");
+				if(hMapFile==0){
+			        continue;
+			    }
+			    char*sharedData=(char*)MapViewOfFile(hMapFile,FILE_MAP_ALL_ACCESS,0,0,256);
+			    if(sharedData==0){
+			        CloseHandle(hMapFile);
+			        continue;
+			    }
+			    hMapFile2=CreateFileMapping(INVALID_HANDLE_VALUE,0,PAGE_READWRITE,0,sizeof(unsigned long long),"hidepid");
+				if(hMapFile2==0){
+			        continue;
+			    }
+			    unsigned long long*sharedData2=(unsigned long long*)MapViewOfFile(hMapFile2,FILE_MAP_ALL_ACCESS,0,0,sizeof(unsigned long long));
+			    if(sharedData2==0){
+			        CloseHandle(hMapFile2);
+			        continue;
+			    }
+				if(taskpid){
+					scanf("%llu",&hidepid);
+					strcpy(sharedData,"ILLTY");
+			    	*sharedData2=hidepid;
+			    	if(injectdll(taskpid,dpath)){
+						printf("%s\n","Success");
+					}else{
+						printf("%s\n","Fail");
+					}
+					continue;
+				}
+				if(strcmp(s,comd[14]))continue;
+				scanf("%llu",&taskpid);
+				scanf("%llu",&hidepid);
+			    GetProcessNameByPID(taskpid,sharedData);
+			    *sharedData2=hidepid;
+			    hdll2=LoadLibrary("Dll2.dll");
+			    wph2=GetProcAddress(hdll2,"WindowHookCallback");
+			    wHook2=SetWindowsHookEx(WH_CBT,(HOOKPROC)wph2,hdll2,0);
+				if(wHook2){
+					printf("%s\n","Success");
+				}else{
+					printf("%s\n","Fail");
+				}
+			}
 			if(!strcmp(s,comd[9])){
 				scanf("%s",s);
 				if(!strcmp(s,comd[10])){
 					hdll=LoadLibrary("Dll1.dll");
 					wph=GetProcAddress(hdll,"WindowHookCallback");
 					wHook=SetWindowsHookEx(WH_CBT,(HOOKPROC)wph,hdll,0);
-					xm=0;
 					printf("%s\n","Done");
 				}
-			}else{
-				xm=(HWND)hchge(s);
 			}
-			if(xm){
-				for(a=c.b;a;a=a->b){
-					if(a->a==xm){
-						GetWindowPlacement(a->a,&placement);
-						a->type=placement.showCmd;
-						ShowWindow(a->a,0);
-						printf("%s\n","Done");
-						break;
+			if(!strcmp(s,comd[12])){
+				scanf("%p",&xm);
+				if(xm){
+					for(a=c.b;a;a=a->b){
+						if(a->a==xm){
+							GetWindowPlacement(a->a,&placement);
+							a->type=placement.showCmd;
+							ShowWindow(a->a,0);
+							printf("%s\n","Done");
+							break;
+						}
 					}
 				}
 			}
@@ -344,11 +479,18 @@ a:
 				if(!strcmp(s,comd[9])){
 					scanf("%s",s);
 					if(!strcmp(s,comd[10])){
-						if(wHook!=0)UnhookWindowsHookEx(wHook);
-    					if(hdll!=0)FreeLibrary(hdll);
+						if(wHook)UnhookWindowsHookEx(wHook);
+    					if(hdll)FreeLibrary(hdll);
     					printf("%s\n","Done");
 					}
-				}		
+				}
+				if(!strcmp(s,comd[13])){
+    				if(hdll2)FreeLibrary(hdll2);
+					if(wHook2)UnhookWindowsHookEx(wHook2);
+    				else uninstalldll(taskpid,dpath);
+					printf("%s\n","Done");
+					continue;
+				}
 			}
 		}
 	}
@@ -370,6 +512,9 @@ void init(){
 	EnumWindows(EnumWindowsProc,0);
 	SetLayeredWindowAttributes(x,RGB(0,0,0),125,2);
     SetConsoleTextAttribute(GetStdHandle(STD_OUTPUT_HANDLE),FOREGROUND_BLUE|FOREGROUND_GREEN|FOREGROUND_INTENSITY);
+    GetModuleFileName(0,dpath,1024);
+    fileName=strrchr(dpath,'\\')+1;
+	strcpy(fileName,"Dll2.dll");
 }
 int main(){
 	init();
@@ -388,6 +533,9 @@ int main(){
     }
     UnhookWindowsHookEx(kHook);
     UnhookWindowsHookEx(mHook);
-    if(wHook!=0)UnhookWindowsHookEx(wHook);
-    if(hdll!=0)FreeLibrary(hdll);
+    if(hMapFile)CloseHandle(hMapFile);
+    if(wHook)UnhookWindowsHookEx(wHook);
+    if(wHook2)UnhookWindowsHookEx(wHook2);
+    if(hdll)FreeLibrary(hdll);
+    if(hdll2)FreeLibrary(hdll2);
 }
